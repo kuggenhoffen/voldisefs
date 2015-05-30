@@ -12,6 +12,8 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"io"
+	"flag"
+	"fmt"
 )
 
 type Page struct {
@@ -108,6 +110,22 @@ func FileUploader(fileHandle multipart.File, fileHeader multipart.FileHeader, pa
 	}
 }
 
+const indexTemplate = `
+	<html>
+	<head>
+	<title>Distributed file storage</title>
+	</head>
+	<body>
+	<b>{{printf "%s" .Error}}</b><br />
+	{{printf "%s" .Body}}
+	<form method="POST" action="/" enctype="multipart/form-data">
+	File: <input type="file" name="file" /><br />
+	Password: <input type="text" name="password" /><br />
+	<input type="submit" value="Submit" />
+	</form>
+	
+	</body>
+	</html>`
 func IndexHandler(writer http.ResponseWriter, req *http.Request) {
 	InfoLogger.Printf("Request for index page")
 	
@@ -119,28 +137,38 @@ func IndexHandler(writer http.ResponseWriter, req *http.Request) {
 	password := req.FormValue("password")
 	if err != nil || len(password) == 0 {
 		page.Error = []byte("No password or file given")
-		return
+	} else {
+		FileUploader(file, *fileHeader, password)
+		InfoLogger.Printf("Uploaded %s with %s as password", fileHeader.Filename, password)
 	}
 	
-	FileUploader(file, *fileHeader, password)
-	
-	InfoLogger.Printf("Uploaded %s with %s as password", fileHeader.Filename, password)
-	
 	page.Body = []byte("Hello world")
-    t, _ := template.ParseFiles("index.html")
+    t, _ := template.New("index").Parse(indexTemplate)
     t.Execute(writer, page)
-}
-
-func ConnectionManager() {
-	
 }
 
 func main() {
 	// Init logging
-	InfoLogger = log.New(os.Stdout, "INFO: ", log.LstdFlags)
+	InfoLogger = log.New(os.Stdout, "[MAIN][INFO] ", log.LstdFlags)
 	
+	// Get command line parameters
+	var webServerPort int
+	var peerPort int
+	var bootstrap string
 	
+	flag.IntVar(&webServerPort, "http", 8080, "Web server HTTP port")
+	flag.IntVar(&peerPort, "peer", 10001, "TCP port used to peer with other nodes")
+	flag.StringVar(&bootstrap, "bootstrap", "127.0.0.1:10100", "Address of a node connected to network to use for bootstrapping. Format is ip:port")
+	flag.Parse()
+	_ = webServerPort
+	_ = peerPort
+	_ = bootstrap
+	
+	// Start peermanager
+	go StartPeerManager()
+	
+	InfoLogger.Printf("Starting HTTP interface :%d", webServerPort)
 	
 	http.HandleFunc("/", IndexHandler)
-	http.ListenAndServe(":8000", nil)
+	http.ListenAndServe(fmt.Sprintf(":%d", webServerPort), nil)
 }
