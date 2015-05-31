@@ -217,8 +217,8 @@ func main() {
 	flag.Parse()
 	
 	// Start chunk manager
-	ChunkQueue = make(chan *ChunkChannel)
-	go StartChunkManager(ChunkQueue, PeerChannel)
+	ChunkQueue = make(chan *ChunkChannel, 10)
+	go StartChunkManager(ChunkQueue)
 	
 	// Start peermanager
 	if bootstrap != "" {

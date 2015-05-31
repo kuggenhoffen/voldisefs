@@ -13,11 +13,11 @@ const (
 	MsgBootstrapResponse
 )
 
-type BootstrapState int
+type PeerState int
 const (
-	StateBootstrapNone	BootstrapState = iota
+	StateBootstrapStart	PeerState = iota
 	StateBootstrapWait
-	StateBootstrapDone
+	StateIdle
 )
 
 type MessageInfo struct {
@@ -65,7 +65,7 @@ type PeerInfo struct {
 	Name			string
 	Address			string
 	ServerPort		int
-	StateBootstrap	BootstrapState
+	State	PeerState
 }
 
 func (pi *PeerInfo) String() string {

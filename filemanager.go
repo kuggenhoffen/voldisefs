@@ -37,7 +37,7 @@ type ChunkChannel struct {
 var FileList		FileDescriptorList
 var PeerChannel		=make(chan *PeerInfo, 10)
 
-func StartChunkManager(inc <- chan *ChunkChannel, inp <- chan *PeerInfo) {
+func StartChunkManager(inc <- chan *ChunkChannel) {
 	FileList.Files = make(map[string]FileInfo)
 	InfoLogger.Printf("ChunkManager starting...")
 	for {
@@ -46,12 +46,25 @@ func StartChunkManager(inc <- chan *ChunkChannel, inp <- chan *PeerInfo) {
 		nc := <-inc
 		// Get next peer from channel
 		InfoLogger.Printf("Waiting for peers...")
-		np := <-PeerChannel
-		_ = nc
-		_ = np
+		np := <- PeerChannel
+		for {
+			// Check that peer from channel has finished bootstrap
+			if np.State != StateIdle {
+				// Put still bootstrapping peers back to channel
+				PeerChannel <- np
+			} else {
+				// Good peer, continue
+				break
+			}
+			// Get new peer since the last one wasn't ready
+			np = <-PeerChannel
+		}
+		
 		// Add chunk to filelist
 		FileList.AddChunkID(nc.FileName, nc.Chunk.ID, nc.Key)
 		InfoLogger.Printf("File count %d", len(FileList.Files))
+		
+		
 	}
 }
 

@@ -60,7 +60,7 @@ func StartNetwork(serverPort int, baddr *net.TCPAddr) {
 	}
 }
 
-var BootstrapRequestChannel = make(chan *PeerInfo, 1)
+var BootstrapRequestChannel = make(chan PeerInfo, 10)
 func StartBootstrap(addr *net.TCPAddr) {
 	
 	// Create temporary peerinfo for bootstrap server
@@ -68,23 +68,23 @@ func StartBootstrap(addr *net.TCPAddr) {
 	peerInfo.Address = addr.IP.String()
 	peerInfo.ServerPort = addr.Port
 	peerInfo.Name = ""
-	peerInfo.StateBootstrap = StateBootstrapNone
+	peerInfo.State = StateBootstrapStart
 	
-	BootstrapRequestChannel<-peerInfo
+	BootstrapRequestChannel<-*peerInfo
 	
 	go BootstrapProcessor(BootstrapRequestChannel, PeerChannel)
 }
 
-func BootstrapProcessor(bsReqs <-chan *PeerInfo, pi chan<- *PeerInfo) {
+func BootstrapProcessor(bsReqs <-chan PeerInfo, pi chan<- *PeerInfo) {
 	for {
 		InfoLogger.Printf("Waiting for bootstrap")
 		newPeer := <-bsReqs
 		
 		// Don't bootstrap with self or one that already is bootstrapping/bootstrapped
-		if newPeer.StateBootstrap != StateBootstrapNone {
+		if newPeer.State != StateBootstrapStart {
 			continue
 		}
-		newPeer.StateBootstrap = StateBootstrapWait
+		newPeer.State = StateBootstrapStart
 		
 		// Try to establish client connection to given server
 		addr, err := net.ResolveTCPAddr("tcp", newPeer.ToKey())
@@ -99,7 +99,7 @@ func BootstrapProcessor(bsReqs <-chan *PeerInfo, pi chan<- *PeerInfo) {
 		InfoLogger.Printf("Initiating bootstrap with %s", addr.String())
 		
 		peerManager.Lock()
-		peerManager.addPeer(newPeer)
+		peerManager.addPeer(&newPeer)
 		peerManager.Unlock()
 		
 		err = SendBootstrapRequest(conn, &ownInfo)
@@ -189,8 +189,9 @@ func ClientConnection(conn *net.TCPConn) {
 		peerInfo.Name = ""
 	}
 	
+	stop := false
 	// Read loop
-	for {
+	for !stop {
 		// Decode message from stream
 		msg, err := DecodeMessage(conn)
 		
@@ -206,6 +207,7 @@ func ClientConnection(conn *net.TCPConn) {
 		case MsgBootstrapResponse:
 			InfoLogger.Printf("Received bootstrap resp")
 			BootstrapResponseHandler(conn, &msgInfo)
+			stop = true
 			break
 		}
 	}
@@ -246,22 +248,26 @@ func BootstrapResponseHandler(conn *net.TCPConn, msg *MessageInfo) {
 			p.Name = msg.Data.MsgData.(*BootstrapResponse).Name
 			InfoLogger.Printf("Existing peer %s name updated %s", conn.RemoteAddr().String(), p.Name)
 		}
+		p.State = StateIdle
+		InfoLogger.Printf("Bootstrap finished with %s (%s)",p.Name ,conn.RemoteAddr().String())
 	}
 	
 	for _, peer := range msg.Data.MsgData.(*BootstrapResponse).Peers {
 		// Discard own peerinfo
+		InfoLogger.Printf("Comparing %s to %s", peer.Name, ownInfo.Name)
 		if peer.Name == ownInfo.Name {
 			continue
 		}
 		
-		// Update peer name if it doesn't match (happens after bootstrap)
+		// Check if we have already bootstrapped with the peer (exists in peermanager)
 		if p, exists := peerManager.peers[peer.ToKey()]; exists {
+			// Update name if it's not the same
 			if p.Name != peer.Name {
 				peer.Name = p.Name
 			}
 		} else {
 			// Otherwise put peer into request channel for requesting bootstrap
-			BootstrapRequestChannel <- &peer
+			BootstrapRequestChannel <- peer
 		}
 	}
 }
