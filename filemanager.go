@@ -34,8 +34,15 @@ type ChunkChannel struct {
 	Chunk		ChunkInfo
 }
 
-var FileList		FileDescriptorList
-var PeerChannel		=make(chan *PeerInfo, 10)
+var (
+	FileList		FileDescriptorList
+	PeerChannel		= make(chan *PeerInfo, 10)
+	ChunkStorage	= make(map[ChunkID]*ChunkInfo)
+)
+
+func (cid *ChunkID) String() string {
+	return string(append(cid[:]))
+}
 
 func StartChunkManager(inc <- chan *ChunkChannel) {
 	FileList.Files = make(map[string]FileInfo)
@@ -47,13 +54,15 @@ func StartChunkManager(inc <- chan *ChunkChannel) {
 		// Get next peer from channel
 		InfoLogger.Printf("Waiting for peers...")
 		np := <- PeerChannel
+
+		InfoLogger.Printf("Got peer with state %d", np.State)
 		for {
 			// Check that peer from channel has finished bootstrap
 			if np.State != StateIdle {
 				// Put still bootstrapping peers back to channel
 				PeerChannel <- np
 			} else {
-				// Good peer, continue
+				// Try to establish client connection to given server
 				break
 			}
 			// Get new peer since the last one wasn't ready
@@ -62,9 +71,14 @@ func StartChunkManager(inc <- chan *ChunkChannel) {
 		
 		// Add chunk to filelist
 		FileList.AddChunkID(nc.FileName, nc.Chunk.ID, nc.Key)
-		InfoLogger.Printf("File count %d", len(FileList.Files))
 		
+		err := SendChunkStoreRequest(np, nc.Chunk)
+		if err == nil {
+			InfoLogger.Printf("Sent chunk store request message with chunk id %s", nc.Chunk.ID)
+		}
 		
+		// Put peer back to channel for next chunk
+		PeerChannel <- np
 	}
 }
 

@@ -11,6 +11,10 @@ type MessageType int
 const (
 	MsgBootstrapRequest MessageType = iota
 	MsgBootstrapResponse
+	MsgChunkStoreRequest
+	MsgChunkStoreResponse
+	MsgChunkRetrieveRequest
+	MsgChunkRetrieveResponse
 )
 
 type PeerState int
@@ -29,6 +33,7 @@ type MessageInfo struct {
 // is used for communicating between nodes
 type BaseMessage struct {
 	MsgType		MessageType
+	Name		string
 	MsgData		interface{}			// Different message types will be placed here
 }
 
@@ -37,13 +42,13 @@ type BaseMessage struct {
 // message structs
 type BaseMessageDecode struct {
 	MsgType		MessageType
+	Name		string
 	MsgData		*json.RawMessage		// Different message types will be placed here
 }
 
 // BootstrapRequest struct defines the bootstrap request message format, where Name
 // is the unique name of the requester and ServerPort is the server port of the requester
 type BootstrapRequest struct {
-	Name			string
 	ServerPort		int
 }
 
@@ -51,7 +56,6 @@ type BootstrapRequest struct {
 // Name is the unique name of the response sender, and Peers is a PeerInfo array of
 // known peers to the response sender
 type BootstrapResponse struct {
-	Name		string
 	Peers		[]PeerInfo
 }
 
@@ -60,6 +64,17 @@ type BootstrapResponse struct {
 // ID field of 16 bytes to identify the chunk, and the ChunkData field containing
 // the encrypted chunk data
 type ChunkStoreRequest ChunkInfo
+
+// ChunkRetrieveRequest defines the chunk retrieval message format, the requester
+// uses this message to request chunks by their id from a peer.
+type ChunkRetrieveRequest struct {
+	ID		ChunkID
+}
+
+// ChunkRetrieveResponse defines the chunk retrieval response message format
+// containing the chunk id and data if one was found, otherwise both fields 
+// will be empty
+type ChunkSRetrieveResponse ChunkInfo
 
 type PeerInfo struct {
 	Name			string
@@ -101,7 +116,7 @@ func DecodeMessage(reader io.Reader) (*BaseMessage, error) {
 			return nil, err
 		}
 		InfoLogger.Printf("Bootstrap request received with data: %s", bmd.MsgData)
-		msg = &BaseMessage{MsgType: bmd.MsgType, MsgData: br}
+		msg = &BaseMessage{MsgType: bmd.MsgType, Name: bmd.Name, MsgData: br}
 	case MsgBootstrapResponse:
 		br := new(BootstrapResponse)
 		err := json.Unmarshal(*bmd.MsgData, br)
@@ -110,7 +125,17 @@ func DecodeMessage(reader io.Reader) (*BaseMessage, error) {
 			return nil, err
 		}
 		InfoLogger.Printf("Bootstrap response received with data: %s", bmd.MsgData)
-		msg = &BaseMessage{MsgType: bmd.MsgType, MsgData: br}
+		msg = &BaseMessage{MsgType: bmd.MsgType, Name: bmd.Name, MsgData: br}
+	case MsgChunkStoreRequest:
+		ci := new(ChunkInfo)
+		err := json.Unmarshal(*bmd.MsgData, ci)
+		if err != nil {
+			InfoLogger.Printf("Decoding error on ChunkStoreRequest")
+			return nil, err
+		}
+		InfoLogger.Printf("Chunk store request received with data: %s", bmd.MsgData)
+		msg = &BaseMessage{MsgType: bmd.MsgType, Name: bmd.Name, MsgData: ci}
+
 	}
 	
 	return msg, nil
@@ -120,7 +145,8 @@ func DecodeMessage(reader io.Reader) (*BaseMessage, error) {
 func SendBootstrapRequest(writer io.Writer, ownPeerInfo *PeerInfo) (error) {
 	// Get base message struct
 	msg := BaseMessage{ MsgType: MsgBootstrapRequest, 
-						MsgData: BootstrapRequest{ServerPort: ownPeerInfo.ServerPort, Name: ownPeerInfo.Name} }
+						Name: ownPeerInfo.Name,
+						MsgData: BootstrapRequest{ServerPort: ownPeerInfo.ServerPort} }
 	
 	str,_ := json.Marshal(msg)
 	InfoLogger.Printf("Sent: %s", str)
@@ -146,7 +172,8 @@ func SendBootstrapResponse(writer io.Writer, ownPeerInfo *PeerInfo, peerInfos Pe
 	
 	// Create bootstrap response message structure
 	msg := BaseMessage{ MsgType: MsgBootstrapResponse, 
-						MsgData: BootstrapResponse{Name: ownPeerInfo.Name, Peers: p} }
+						Name: ownPeerInfo.Name,
+						MsgData: BootstrapResponse{Peers: p} }
 	//str,_ := json.Marshal(msg)
 	// Create encoder to given writer and encode message
 	enc := json.NewEncoder(writer)
@@ -155,21 +182,44 @@ func SendBootstrapResponse(writer io.Writer, ownPeerInfo *PeerInfo, peerInfos Pe
 	return err
 }
 
-func SendChunkStoreRequest(writer io.Writer, ownPeerInfo *PeerInfo) (error) {
+func SendChunkStoreRequest(recv *PeerInfo, ch ChunkInfo) (error) {
+	c, e := GetClientConnection(recv)
+	if e != nil {
+		return e
+	}
+	
 	// Get base message struct
-	msg := BaseMessage{ MsgType: MsgBootstrapRequest, 
-						MsgData: BootstrapRequest{ServerPort: ownPeerInfo.ServerPort, Name: ownPeerInfo.Name} }
+	msg := BaseMessage{ MsgType: MsgChunkStoreRequest, 
+						Name: ownInfo.Name,
+						MsgData: ch }
 	
 	str,_ := json.Marshal(msg)
 	InfoLogger.Printf("Sent: %s", str)
 	
-	// Create encoder to given writer and encode message
-	enc := json.NewEncoder(writer)
+	// Create encoder to given connection and encode message
+	enc := json.NewEncoder(c)
 	err := enc.Encode(msg)
 	
-	if err == nil {
-		InfoLogger.Printf("Sent bootstrap request message")
+	return err
+}
+
+func SendChunkRetrieveRequest(recv *PeerInfo, cid ChunkID) (error) {
+	c, e := GetClientConnection(recv)
+	if e != nil {
+		return e
 	}
+	
+	// Get base message struct
+	msg := BaseMessage{ MsgType: MsgChunkRetrieveRequest, 
+						Name: ownInfo.Name,
+						MsgData: ChunkRetrieveRequest{ ID: cid } }
+	
+	str,_ := json.Marshal(msg)
+	InfoLogger.Printf("Sent: %s", str)
+	
+	// Create encoder to given connection and encode message
+	enc := json.NewEncoder(c)
+	err := enc.Encode(msg)
 	
 	return err
 }

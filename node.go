@@ -23,6 +23,8 @@ type Page struct {
 	Body 	[]byte
 	Peers 	[]PeerInfo
 	Name	string
+	Chunks	[]string
+	Files	[]string
 }
 
 var (
@@ -157,12 +159,33 @@ const indexTemplate = `
 	File: <input type="file" name="file" /><br />
 	Password: <input type="text" name="password" /><br />
 	<input type="submit" value="Submit" /><br />
-	<table>
+	</form>
+	
+	<table border="1px; solid; #000000">
+	<tr><td colspan="3">Connected peers</td></tr>
+	<tr><td>Name</td><td>Address</td><td>State</td></tr>
 	{{range $peer := .Peers}}
-	<tr><td>{{$peer.Name}}</td><td>{{$peer.Address}}:{{$peer.ServerPort}}</td></tr>
+	<tr><td>{{$peer.Name}}</td><td>{{$peer.Address}}:{{$peer.ServerPort}}</td><td>{{$peer.State}}</td></tr>
 	{{end}}
 	</table>
-	{{printf "%s" .Body}}
+	
+	<hr />
+	<table border="1px; solid; #000000">
+	<tr><td>Stored files</td></tr>
+	<tr><td>ID</td>
+	{{range $file := .Files}}
+	<tr><td>{{$file}}</td></tr>
+	{{end}}
+	</table>
+	
+	<hr />
+	<table border="1px; solid; #000000">
+	<tr><td>Stored chunks</td></tr>
+	<tr><td>ID</td>
+	{{range $chunk := .Chunks}}
+	<tr><td>{{$chunk}}</td></tr>
+	{{end}}
+	</table>
 	</form>
 	
 	</body>
@@ -184,6 +207,24 @@ func IndexHandler(writer http.ResponseWriter, req *http.Request) {
 	peerManager.RUnlock()
 	page.Peers = p
 	
+	// Get local chunks
+	page.Chunks = make([]string, len(ChunkStorage))
+	i = 0
+	for _, c := range ChunkStorage {
+		page.Chunks[i] = (*c).ID.String()
+		i = i + 1
+	}
+	
+	// Get files
+	FileList.RLock()
+	page.Files = make([]string, len(FileList.Files))
+	i = 0
+	for _, f := range FileList.Files {
+		page.Files[i] = f.FileName
+		i = i + 1
+	}
+	FileList.RUnlock()
+	
 	// Add own name
 	page.Name = ownInfo.Name
 	
@@ -196,9 +237,7 @@ func IndexHandler(writer http.ResponseWriter, req *http.Request) {
 		FileUploader(file, *fileHeader, password)
 		InfoLogger.Printf("Uploaded %s with %s as password", fileHeader.Filename, password)
 	}
-	
-	page.Body = []byte("Hello world")
-    t, _ := template.New("index").Parse(indexTemplate)
+	    t, _ := template.New("index").Parse(indexTemplate)
     t.Execute(writer, page)
 }
 
