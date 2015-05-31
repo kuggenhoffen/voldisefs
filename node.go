@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"net/http"
+	"net"
 	"html/template"
 	"log"
 	"mime/multipart"
@@ -153,22 +154,33 @@ func main() {
 	
 	// Get command line parameters
 	var webServerPort int
-	var peerPort int
+	var serverPort int
 	var bootstrap string
 	
 	flag.IntVar(&webServerPort, "http", 8080, "Web server HTTP port")
-	flag.IntVar(&peerPort, "peer", 10001, "TCP port used to peer with other nodes")
-	flag.StringVar(&bootstrap, "bootstrap", "127.0.0.1:10100", "Address of a node connected to network to use for bootstrapping. Format is ip:port")
+	flag.IntVar(&serverPort, "serverport", 10001, "TCP port used to listen for peer connections with other nodes")
+	flag.StringVar(&bootstrap, "bootstrap", "", "Optional address of a node to use bootstrapping into network. Format is ip:port")
 	flag.Parse()
-	_ = webServerPort
-	_ = peerPort
-	_ = bootstrap
 	
 	// Start peermanager
-	go StartPeerManager()
-	
-	InfoLogger.Printf("Starting HTTP interface :%d", webServerPort)
+	if bootstrap != "" {
+		bootstrapAddr, err := net.ResolveTCPAddr("tcp4", bootstrap)
+		if err != nil {
+			InfoLogger.Printf("No bootstrap address given")
+		}
+		go StartNetwork(serverPort, bootstrapAddr)
+	} else {
+		go StartNetwork(serverPort, nil)
+	}
 	
 	http.HandleFunc("/", IndexHandler)
-	http.ListenAndServe(fmt.Sprintf(":%d", webServerPort), nil)
+	// Try starting webserver, incrementing port every time it fails
+	for {
+		InfoLogger.Printf("Starting HTTP interface :%d", webServerPort)
+		err := http.ListenAndServe(fmt.Sprintf(":%d", webServerPort), nil)
+		if err != nil {
+			InfoLogger.Printf("Port already in use :%d", webServerPort)
+			webServerPort = webServerPort + 1
+		}
+	}
 }
