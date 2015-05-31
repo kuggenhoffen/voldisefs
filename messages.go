@@ -28,10 +28,18 @@ type BaseMessageDecode struct {
 	MsgData		*json.RawMessage		// Different message types will be placed here
 }
 
+type BootstrapState int
+const (
+	StateBootstrapNone	BootstrapState = iota
+	StateBootstrapWait
+	StateBootstrapDone
+)
+
 type PeerInfo struct {
 	Name			string
 	Address			string
 	ServerPort		int
+	StateBootstrap	BootstrapState
 }
 
 func (pi *PeerInfo) String() string {
@@ -53,47 +61,37 @@ type BootstrapResponse struct {
 }
 
 func DecodeMessage(reader io.Reader) (*BaseMessage, error) {
-	InfoLogger.Printf("Decoding input")
 	// Get JSON decoder using given reader
-	dec := bufio.NewReader(reader)
-	data, err := dec.ReadString('\n')
-	if err != nil {
-		InfoLogger.Printf("Reading error on BaseMessage")
-		return nil, err
-	}
-	InfoLogger.Printf("Data: %s", data)
-	
+	dec := json.NewDecoder(bufio.NewReader(reader))
+
 	// First decode into BaseMessageDecode, so that the payload stays encoded
 	bmd := new(BaseMessageDecode)
-	err = json.Unmarshal([]byte(data), bmd)
-	InfoLogger.Printf("Data: %s", bmd.MsgData)
-	//err := dec.Decode(bmd)
+	err := dec.Decode(bmd)
 	
 	if err != nil {
 		InfoLogger.Printf("Decoding error on BaseMessage")
 		return nil, err
 	}
 	
+	// Initialize BaseMessage struct and decode MsgData field based on MsgType field
 	msg := new(BaseMessage)
-	
 	switch bmd.MsgType {
 	case MsgBootstrapRequest:
 		br := new(BootstrapRequest)
-		InfoLogger.Printf("Data: %s", bmd.MsgData)
-		//err := json.Unmarshal(bmd.MsgData, br)
+		err := json.Unmarshal(*bmd.MsgData, br)
 		if err != nil {
 			InfoLogger.Printf("Decoding error on BootstrapRequest")
 			return nil, err
 		}
-		msg = &BaseMessage{MsgType: MsgBootstrapRequest, MsgData: br}
+		msg = &BaseMessage{MsgType: bmd.MsgType, MsgData: br}
 	case MsgBootstrapResponse:
 		br := new(BootstrapResponse)
-		//err := json.Unmarshal(bmd.MsgData, br)
+		err := json.Unmarshal(*bmd.MsgData, br)
 		if err != nil {
-			InfoLogger.Printf("Decoding error on BootstrapRequest")
+			InfoLogger.Printf("Decoding error on BootstrapResponse")
 			return nil, err
 		}
-		msg = &BaseMessage{MsgType: MsgBootstrapRequest, MsgData: br}
+		msg = &BaseMessage{MsgType: bmd.MsgType, MsgData: br}
 	}
 	
 	return msg, nil
@@ -132,16 +130,15 @@ func SendBootstrapResponse(writer io.Writer, ownPeerInfo *PeerInfo, peerInfos Pe
 	}
 	
 	// Create bootstrap response message structure
-	msg := BaseMessage{ MsgType: MsgBootstrapRequest, 
+	msg := BaseMessage{ MsgType: MsgBootstrapResponse, 
 						MsgData: BootstrapResponse{Name: ownPeerInfo.Name, Peers: p} }
-	str,_ := json.Marshal(msg)
-	InfoLogger.Printf("Sent: %s", str)
+	//str,_ := json.Marshal(msg)
 	// Create encoder to given writer and encode message
 	enc := json.NewEncoder(writer)
 	err := enc.Encode(msg)
 	
 	if err == nil {
-		InfoLogger.Printf("Sent bootstrap request message")
+		InfoLogger.Printf("Sent bootstrap response message")
 	}
 	
 	return err
