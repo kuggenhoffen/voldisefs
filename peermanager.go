@@ -29,6 +29,7 @@ var (
 // Convenience method for concurrency safe addition of new peers to the map
 func (pm *PeerManager) addPeer(newpeer *PeerInfo) {
 	pm.peers[newpeer.ToKey()] = newpeer
+	PeerChannel <- newpeer
 	InfoLogger.Printf("New peer added %s", newpeer.Name)
 }
 
@@ -71,17 +72,19 @@ func StartBootstrap(addr *net.TCPAddr) {
 	
 	BootstrapRequestChannel<-peerInfo
 	
-	go BootstrapProcessor(BootstrapRequestChannel)
+	go BootstrapProcessor(BootstrapRequestChannel, PeerChannel)
 }
 
-func BootstrapProcessor(bsReqs <-chan *PeerInfo) {
+func BootstrapProcessor(bsReqs <-chan *PeerInfo, pi chan<- *PeerInfo) {
 	for {
 		InfoLogger.Printf("Waiting for bootstrap")
 		newPeer := <-bsReqs
 		
+		// Don't bootstrap with self or one that already is bootstrapping/bootstrapped
 		if newPeer.StateBootstrap != StateBootstrapNone {
 			continue
 		}
+		newPeer.StateBootstrap = StateBootstrapWait
 		
 		// Try to establish client connection to given server
 		addr, err := net.ResolveTCPAddr("tcp", newPeer.ToKey())
@@ -95,13 +98,14 @@ func BootstrapProcessor(bsReqs <-chan *PeerInfo) {
 		
 		InfoLogger.Printf("Initiating bootstrap with %s", addr.String())
 		
-		newPeer.StateBootstrap = StateBootstrapWait
-		
 		peerManager.Lock()
 		peerManager.addPeer(newPeer)
 		peerManager.Unlock()
 		
-		SendBootstrapRequest(conn, &ownInfo)
+		err = SendBootstrapRequest(conn, &ownInfo)
+		if err == nil {
+			InfoLogger.Printf("Sent bootstrap response to %s (%s)", newPeer.Name, newPeer.ToKey())
+		}
 		
 		go ClientConnection(conn)
 	}
@@ -128,13 +132,48 @@ func StartConnectionListener(listenPort int) {
 		// Accept connections
 		newConn, _ := listener.AcceptTCP()
 		
-		go ClientConnection(newConn)
+		go ServerConnection(newConn)
 		
 	}
 }
 
 func HostPortFromConn(conn *net.TCPConn) string {
 	return fmt.Sprintf("%s:%d", conn.RemoteAddr().(*net.TCPAddr).IP, conn.RemoteAddr().(*net.TCPAddr).Port)
+}
+
+func ServerConnection(conn *net.TCPConn) {
+	// Check if the connected peer is already known
+	peerInfo, exists := peerManager.peers[HostPortFromConn(conn)]
+	
+	// Create new peer object if the client doesn't have one yet
+	if !exists {
+		InfoLogger.Printf("Peer not in peerlist")
+		peerInfo = new(PeerInfo)
+		peerInfo.Address = conn.RemoteAddr().(*net.TCPAddr).IP.String()
+		peerInfo.ServerPort = conn.RemoteAddr().(*net.TCPAddr).Port
+		peerInfo.Name = ""
+	}
+	
+	// Read loop
+	for {
+		// Decode message from stream
+		msg, err := DecodeMessage(conn)
+		if err != nil && msg == nil {
+			InfoLogger.Printf("TCP server connection closing, received %s", err.Error())
+			break
+		}
+		InfoLogger.Printf("Server received %d from %s", msg.MsgType, peerInfo.ToKey())
+		
+		msgInfo := MessageInfo{peerInfo, msg}
+		switch msg.MsgType {
+		case MsgBootstrapRequest:
+			InfoLogger.Printf("Received bootstrap req")
+			BootstrapRequestHandler(conn, &msgInfo)
+		}
+	}
+	
+	// Read loop finished, close connection
+	conn.Close()
 }
 
 func ClientConnection(conn *net.TCPConn) {
@@ -154,22 +193,25 @@ func ClientConnection(conn *net.TCPConn) {
 	for {
 		// Decode message from stream
 		msg, err := DecodeMessage(conn)
+		
 		if err != nil && msg == nil {
-			InfoLogger.Printf("TCP connection closing, received %s", err.Error())
+			InfoLogger.Printf("TCP client connection closing, received %s", err.Error())
 			break
 		}
-		InfoLogger.Printf("Message %d received from %s", msg.MsgType, peerInfo.ToKey())
+		
+		InfoLogger.Printf("Client received %d from %s", msg.MsgType, peerInfo.ToKey())
 		
 		msgInfo := MessageInfo{peerInfo, msg}
 		switch msg.MsgType {
-		case MsgBootstrapRequest:
-			InfoLogger.Printf("Received bootstrap req")
-			BootstrapRequestHandler(conn, &msgInfo)
 		case MsgBootstrapResponse:
 			InfoLogger.Printf("Received bootstrap resp")
 			BootstrapResponseHandler(conn, &msgInfo)
+			break
 		}
 	}
+
+	// Read loop finished, close connection
+	conn.Close()
 }
 
 func BootstrapRequestHandler(conn *net.TCPConn, msg *MessageInfo) {
@@ -182,8 +224,11 @@ func BootstrapRequestHandler(conn *net.TCPConn, msg *MessageInfo) {
 	}
 	peerManager.Unlock()
 	peerManager.RLock()
-	SendBootstrapResponse(conn, &ownInfo, peerManager)
+	err := SendBootstrapResponse(conn, &ownInfo, peerManager)
 	peerManager.RUnlock()
+	if err == nil {
+		InfoLogger.Printf("Sent bootstrap response to %s (%s)", msg.Src.Name, msg.Src.ToKey())
+	}
 }
 
 func BootstrapResponseHandler(conn *net.TCPConn, msg *MessageInfo) {
@@ -195,18 +240,28 @@ func BootstrapResponseHandler(conn *net.TCPConn, msg *MessageInfo) {
 		return
 	}
 	
+	// Check if sender is in our peerlist and update it's name if so
+	if p, exists := peerManager.peers[msg.Src.ToKey()]; exists {
+		if p.Name != msg.Data.MsgData.(*BootstrapResponse).Name {
+			p.Name = msg.Data.MsgData.(*BootstrapResponse).Name
+			InfoLogger.Printf("Existing peer %s name updated %s", conn.RemoteAddr().String(), p.Name)
+		}
+	}
+	
 	for _, peer := range msg.Data.MsgData.(*BootstrapResponse).Peers {
+		// Discard own peerinfo
+		if peer.Name == ownInfo.Name {
+			continue
+		}
+		
+		// Update peer name if it doesn't match (happens after bootstrap)
 		if p, exists := peerManager.peers[peer.ToKey()]; exists {
-			// Update peer name if it doesn't match (happens after bootstrap)
 			if p.Name != peer.Name {
 				peer.Name = p.Name
 			}
 		} else {
-			// Peer isn't in our list yet, check it's not us and add it
-			if peer.ToKey() != ownInfo.ToKey() {
-				// Put peer into request channel for requesting bootstrap
-				BootstrapRequestChannel <- &peer
-			}
+			// Otherwise put peer into request channel for requesting bootstrap
+			BootstrapRequestChannel <- &peer
 		}
 	}
 }

@@ -12,26 +12,37 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"io"
 	"flag"
 	"fmt"
 )
 
 type Page struct {
-	Error []byte
-	Body []byte
+	Error 	[]byte
+	Body 	[]byte
+	Peers 	[]PeerInfo
+	Name	string
 }
 
 var (
 	InfoLogger	*log.Logger
+	ChunkQueue	chan *ChunkChannel
 )
 
-func Encrypt(key, plaintext []byte) string {
+func Encrypt(key, plaintext []byte, index int64) string {
     block, err := aes.NewCipher(key)
     if err != nil {
         panic(err)
     }
     
+    // Prepend data with index and size
+	indBytes := make([]byte, binary.MaxVarintLen32 + binary.MaxVarintLen32)
+	count := binary.PutVarint(indBytes, index)
+	l := int64(len(plaintext))
+	binary.PutVarint(indBytes[count:], l)
+	plaintext = append(indBytes, plaintext...)
+	
 	// Initialize byte array to hold initialization vector (size is AES block size)
 	// and the cipher text
     ciphertext := make([]byte, aes.BlockSize + len(plaintext))
@@ -50,7 +61,7 @@ func Encrypt(key, plaintext []byte) string {
     return base64.StdEncoding.EncodeToString(ciphertext)
 }
 
-func Decrypt(key, encoded_ciphertext []byte) string {
+func Decrypt(key, encoded_ciphertext []byte) (string, int64) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		panic(err)
@@ -76,14 +87,24 @@ func Decrypt(key, encoded_ciphertext []byte) string {
 	stream := cipher.NewCFBDecrypter(block, iv)
 	stream.XORKeyStream(ciphertext, ciphertext)
 	
+    // Decode index from beginning of plaintext
+	index, count := binary.Varint(ciphertext)
+	length, c := binary.Varint(ciphertext[count:])
+	ciphertext = ciphertext[count+c:length]
+	
 	// Finally return the resulting plaintext
-	return string(ciphertext)
+	return string(ciphertext), index
 }
 
 func FileUploader(fileHandle multipart.File, fileHeader multipart.FileHeader, password string) {
-	defer fileHandle.Close()
+	defer fileHandle.Close()		
+	
+	// Calculate sha256 checksum for password
+	hash := sha256.Sum256([]byte(password))
+	index := int64(0)
+	
 	for {
-		// Read 1kB of data to buffer at a time
+		// Read data into 1kB chunks
 		data := make([]byte, 1024)
 		byteCount, err := fileHandle.Read(data)
 		
@@ -92,22 +113,35 @@ func FileUploader(fileHandle multipart.File, fileHeader multipart.FileHeader, pa
 			break
 		}
 		
-		InfoLogger.Printf("Read %d bytes: %s", byteCount, string(data))
-		
-		// Calculate sha256 checksum for password
-		hash := sha256.Sum256([]byte(password))
 		// Encrypt the data
-		ct := Encrypt(hash[:], data)
-		InfoLogger.Printf("Encrypted %d bytes: %s", len(ct), ct)
+		ct := Encrypt(hash[:], data, index)
+		InfoLogger.Printf("Encrypted #%d with %d bytes: %s", index, len(ct), ct)
+		
+		// Generate ID array from first 16 bytes of cipher text, and create ChunkInfo struct
+		var id [16]byte
+		for i, c := range []byte(ct[:16]) {
+			id[i] = c
+		}
+		ci := ChunkInfo{ ID: id,
+						 ChunkData: []byte(ct) }
+		// Put into chunk queue
+		cc := ChunkChannel{ Chunk: ci,
+							FileName: fileHeader.Filename,
+							Key: hash[:] }
+		
+		InfoLogger.Printf("Putting chunk to ChunkManager..")
+		ChunkQueue <- &cc
 		
 		//Decrypt the data
-		pt := Decrypt(hash[:], []byte(ct))
-		InfoLogger.Printf("Decrypted: %s", pt)
+		//pt, index := Decrypt(hash[:], []byte(ct))
+		//InfoLogger.Printf("Decrypted #%d: %s", index, pt)
 		
 		// check if eof reached
 		if err != nil {
 			break
 		}
+		
+		index = index + 1
 	}
 }
 
@@ -117,12 +151,18 @@ const indexTemplate = `
 	<title>Distributed file storage</title>
 	</head>
 	<body>
+	<h1>{{.Name}}</h1><br />
 	<b>{{printf "%s" .Error}}</b><br />
-	{{printf "%s" .Body}}
 	<form method="POST" action="/" enctype="multipart/form-data">
 	File: <input type="file" name="file" /><br />
 	Password: <input type="text" name="password" /><br />
-	<input type="submit" value="Submit" />
+	<input type="submit" value="Submit" /><br />
+	<table>
+	{{range $peer := .Peers}}
+	<tr><td>{{$peer.Name}}</td><td>{{$peer.Address}}:{{$peer.ServerPort}}</td></tr>
+	{{end}}
+	</table>
+	{{printf "%s" .Body}}
 	</form>
 	
 	</body>
@@ -132,6 +172,20 @@ func IndexHandler(writer http.ResponseWriter, req *http.Request) {
 	
 	// Initialize struct for page template
 	page := &Page{}
+	
+	// Get all peers from peerlist and add them to page template
+	peerManager.RLock()
+	p := make([]PeerInfo, len(peerManager.peers))
+	i := 0
+	for _, peer := range peerManager.peers {
+		p[i] = *peer
+		i = i + 1
+	}
+	peerManager.RUnlock()
+	page.Peers = p
+	
+	// Add own name
+	page.Name = ownInfo.Name
 	
 	// First handle form data if any
 	file, fileHeader, err := req.FormFile("file")
@@ -161,6 +215,10 @@ func main() {
 	flag.IntVar(&serverPort, "serverport", 10001, "TCP port used to listen for peer connections with other nodes")
 	flag.StringVar(&bootstrap, "bootstrap", "", "Optional address of a node to use bootstrapping into network. Format is ip:port")
 	flag.Parse()
+	
+	// Start chunk manager
+	ChunkQueue = make(chan *ChunkChannel)
+	go StartChunkManager(ChunkQueue, PeerChannel)
 	
 	// Start peermanager
 	if bootstrap != "" {

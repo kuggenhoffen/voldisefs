@@ -13,27 +13,53 @@ const (
 	MsgBootstrapResponse
 )
 
-type MessageInfo struct {
-	Src		*PeerInfo
-	Data	*BaseMessage
-}
-
-type BaseMessage struct {
-	MsgType		MessageType
-	MsgData		interface{}			// Different message types will be placed here
-}
-
-type BaseMessageDecode struct {
-	MsgType		MessageType
-	MsgData		*json.RawMessage		// Different message types will be placed here
-}
-
 type BootstrapState int
 const (
 	StateBootstrapNone	BootstrapState = iota
 	StateBootstrapWait
 	StateBootstrapDone
 )
+
+type MessageInfo struct {
+	Src		*PeerInfo
+	Data	*BaseMessage
+}
+
+// BaseMessage struct defines the protocol format that gets encoded into JSON and 
+// is used for communicating between nodes
+type BaseMessage struct {
+	MsgType		MessageType
+	MsgData		interface{}			// Different message types will be placed here
+}
+
+// BaseMessageDecode struct defines a intermediate protocol format that is used to
+// decode incoming JSON to recognise MessageType to decode further into correct
+// message structs
+type BaseMessageDecode struct {
+	MsgType		MessageType
+	MsgData		*json.RawMessage		// Different message types will be placed here
+}
+
+// BootstrapRequest struct defines the bootstrap request message format, where Name
+// is the unique name of the requester and ServerPort is the server port of the requester
+type BootstrapRequest struct {
+	Name			string
+	ServerPort		int
+}
+
+// BootstrapResponse struct defines the bootstrap response message format, where
+// Name is the unique name of the response sender, and Peers is a PeerInfo array of
+// known peers to the response sender
+type BootstrapResponse struct {
+	Name		string
+	Peers		[]PeerInfo
+}
+
+// ChunkStoreRequest defines the chunk store request message format, the requester
+// uses this message to distribute chunks to the network. The message contains 
+// ID field of 16 bytes to identify the chunk, and the ChunkData field containing
+// the encrypted chunk data
+type ChunkStoreRequest ChunkInfo
 
 type PeerInfo struct {
 	Name			string
@@ -50,15 +76,6 @@ func (pi *PeerInfo) ToKey() string {
 	return fmt.Sprintf("%s:%d", pi.Address, pi.ServerPort)
 }
 
-type BootstrapRequest struct {
-	Name			string
-	ServerPort		int
-}
-
-type BootstrapResponse struct {
-	Name		string
-	Peers		[]PeerInfo
-}
 
 func DecodeMessage(reader io.Reader) (*BaseMessage, error) {
 	// Get JSON decoder using given reader
@@ -83,6 +100,7 @@ func DecodeMessage(reader io.Reader) (*BaseMessage, error) {
 			InfoLogger.Printf("Decoding error on BootstrapRequest")
 			return nil, err
 		}
+		InfoLogger.Printf("Bootstrap request received with data: %s", bmd.MsgData)
 		msg = &BaseMessage{MsgType: bmd.MsgType, MsgData: br}
 	case MsgBootstrapResponse:
 		br := new(BootstrapResponse)
@@ -91,6 +109,7 @@ func DecodeMessage(reader io.Reader) (*BaseMessage, error) {
 			InfoLogger.Printf("Decoding error on BootstrapResponse")
 			return nil, err
 		}
+		InfoLogger.Printf("Bootstrap response received with data: %s", bmd.MsgData)
 		msg = &BaseMessage{MsgType: bmd.MsgType, MsgData: br}
 	}
 	
@@ -109,10 +128,6 @@ func SendBootstrapRequest(writer io.Writer, ownPeerInfo *PeerInfo) (error) {
 	// Create encoder to given writer and encode message
 	enc := json.NewEncoder(writer)
 	err := enc.Encode(msg)
-	
-	if err == nil {
-		InfoLogger.Printf("Sent bootstrap request message")
-	}
 	
 	return err
 }
@@ -137,8 +152,23 @@ func SendBootstrapResponse(writer io.Writer, ownPeerInfo *PeerInfo, peerInfos Pe
 	enc := json.NewEncoder(writer)
 	err := enc.Encode(msg)
 	
+	return err
+}
+
+func SendChunkStoreRequest(writer io.Writer, ownPeerInfo *PeerInfo) (error) {
+	// Get base message struct
+	msg := BaseMessage{ MsgType: MsgBootstrapRequest, 
+						MsgData: BootstrapRequest{ServerPort: ownPeerInfo.ServerPort, Name: ownPeerInfo.Name} }
+	
+	str,_ := json.Marshal(msg)
+	InfoLogger.Printf("Sent: %s", str)
+	
+	// Create encoder to given writer and encode message
+	enc := json.NewEncoder(writer)
+	err := enc.Encode(msg)
+	
 	if err == nil {
-		InfoLogger.Printf("Sent bootstrap response message")
+		InfoLogger.Printf("Sent bootstrap request message")
 	}
 	
 	return err
