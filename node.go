@@ -12,15 +12,15 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"io"
 	"flag"
 	"fmt"
+	"strings"
 )
 
 type Page struct {
-	Error 	[]byte
-	Body 	[]byte
+	Error 	string
+	Info	string
 	Peers 	[]PeerInfo
 	Name	string
 	Chunks	[]string
@@ -32,23 +32,17 @@ var (
 	ChunkQueue	chan *ChunkChannel
 )
 
-func Encrypt(key, plaintext []byte, index int64) string {
+func Encrypt(key, plaintext []byte) []byte {
     block, err := aes.NewCipher(key)
     if err != nil {
         panic(err)
     }
     
-    // Prepend data with index and size
-	indBytes := make([]byte, binary.MaxVarintLen32 + binary.MaxVarintLen32)
-	count := binary.PutVarint(indBytes, index)
-	l := int64(len(plaintext))
-	binary.PutVarint(indBytes[count:], l)
-	plaintext = append(indBytes, plaintext...)
-	
 	// Initialize byte array to hold initialization vector (size is AES block size)
 	// and the cipher text
     ciphertext := make([]byte, aes.BlockSize + len(plaintext))
     iv := ciphertext[:aes.BlockSize]
+    
     // Generate unique IV from crypto random generator
     if _, err := io.ReadFull(rand.Reader, iv); err != nil {
         panic(err)
@@ -58,20 +52,20 @@ func Encrypt(key, plaintext []byte, index int64) string {
     stream := cipher.NewCFBEncrypter(block, iv)
     // Encrypt plaintext, leave the IV in the beginning
     stream.XORKeyStream(ciphertext[aes.BlockSize:], plaintext)
-    
+
     // Finally encode in base64 and return the resulting ciphertext
-    return base64.StdEncoding.EncodeToString(ciphertext)
+    return []byte(base64.StdEncoding.EncodeToString(ciphertext))
 }
 
-func Decrypt(key, encoded_ciphertext []byte) (string, int64) {
+func Decrypt(key, encoded_ciphertext []byte) []byte {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		panic(err)
 	}
 	
 	// Decode as base64
-	ciphertext := make([]byte, base64.StdEncoding.EncodedLen(len(encoded_ciphertext)))
-	_, err = base64.StdEncoding.Decode(ciphertext, encoded_ciphertext[:])
+	ciphertext := make([]byte, base64.StdEncoding.DecodedLen(len(encoded_ciphertext)))
+	_, err = base64.StdEncoding.Decode(ciphertext, encoded_ciphertext)
 	
 	if err != nil {
 		panic(err)
@@ -89,21 +83,21 @@ func Decrypt(key, encoded_ciphertext []byte) (string, int64) {
 	stream := cipher.NewCFBDecrypter(block, iv)
 	stream.XORKeyStream(ciphertext, ciphertext)
 	
-    // Decode index from beginning of plaintext
-	index, count := binary.Varint(ciphertext)
-	length, c := binary.Varint(ciphertext[count:])
-	ciphertext = ciphertext[count+c:length]
-	
 	// Finally return the resulting plaintext
-	return string(ciphertext), index
+	return ciphertext
+}
+
+func KeyFromPassword(p string) []byte {
+	hash := sha256.Sum256([]byte(p))
+	return hash[:]
 }
 
 func FileUploader(fileHandle multipart.File, fileHeader multipart.FileHeader, password string) {
 	defer fileHandle.Close()		
 	
 	// Calculate sha256 checksum for password
-	hash := sha256.Sum256([]byte(password))
-	index := int64(0)
+	hash := KeyFromPassword(password)
+	index := 0
 	
 	for {
 		// Read data into 1kB chunks
@@ -116,8 +110,8 @@ func FileUploader(fileHandle multipart.File, fileHeader multipart.FileHeader, pa
 		}
 		
 		// Encrypt the data
-		ct := Encrypt(hash[:], data, index)
-		InfoLogger.Printf("Encrypted #%d with %d bytes: %s", index, len(ct), ct)
+		ct := Encrypt(hash[:], data)
+		InfoLogger.Printf("Encrypted #%d with %d bytes: %s", index, byteCount, ct)
 		
 		// Generate ID array from first 16 bytes of cipher text, and create ChunkInfo struct
 		var id [16]byte
@@ -125,6 +119,8 @@ func FileUploader(fileHandle multipart.File, fileHeader multipart.FileHeader, pa
 			id[i] = c
 		}
 		ci := ChunkInfo{ ID: id,
+						 Index: index,
+						 Length: byteCount,
 						 ChunkData: []byte(ct) }
 		// Put into chunk queue
 		cc := ChunkChannel{ Chunk: ci,
@@ -154,7 +150,8 @@ const indexTemplate = `
 	</head>
 	<body>
 	<h1>{{.Name}}</h1><br />
-	<b>{{printf "%s" .Error}}</b><br />
+	<b><font color="red">{{printf "%s" .Error}}</font></b><br />
+	<b><font color="green">{{printf "%s" .Info}}</font></b><br />
 	<form method="POST" action="/" enctype="multipart/form-data">
 	File: <input type="file" name="file" /><br />
 	Password: <input type="text" name="password" /><br />
@@ -171,10 +168,14 @@ const indexTemplate = `
 	
 	<hr />
 	<table border="1px; solid; #000000">
-	<tr><td>Stored files</td></tr>
-	<tr><td>ID</td>
+	<tr><td colspan="3">Stored files</td></tr>
+	<tr><td>ID</td><td>Password</td><td>Download</td>
 	{{range $file := .Files}}
-	<tr><td>{{$file}}</td></tr>
+	<form method="POST" action="/download/"><tr>
+	<td>{{$file}}<input type="hidden" name="filename" value="{{$file}}" /></td>
+	<td><input type="password" name="password" /></td>
+	<td><input type="submit" value="Download" /></td>
+	</tr></form>
 	{{end}}
 	</table>
 	
@@ -190,11 +191,13 @@ const indexTemplate = `
 	
 	</body>
 	</html>`
-func IndexHandler(writer http.ResponseWriter, req *http.Request) {
-	InfoLogger.Printf("Request for index page")
-	
+func IndexRenderer(writer *http.ResponseWriter, req *http.Request, e string, info string) {
 	// Initialize struct for page template
 	page := &Page{}
+		
+	// Populate page structure values
+	page.Name = ownInfo.Name
+	page.Info = info
 	
 	// Get all peers from peerlist and add them to page template
 	peerManager.RLock()
@@ -224,27 +227,91 @@ func IndexHandler(writer http.ResponseWriter, req *http.Request) {
 		i = i + 1
 	}
 	FileList.RUnlock()
+
+	page.Error = e
 	
-	// Add own name
-	page.Name = ownInfo.Name
-	
-	// First handle form data if any
-	file, fileHeader, err := req.FormFile("file")
-	password := req.FormValue("password")
-	if err != nil || len(password) == 0 {
-		page.Error = []byte("No password or file given")
-	} else {
-		FileUploader(file, *fileHeader, password)
-		InfoLogger.Printf("Uploaded %s with %s as password", fileHeader.Filename, password)
+    t, err := template.New("index").Parse(indexTemplate)
+    if err != nil {
+    	panic(err)
+    }
+    t.Execute(*writer, page)
+}
+
+func IndexHandler(writer http.ResponseWriter, req *http.Request) {
+	e := ""
+	i := ""
+	InfoLogger.Printf("Index requested")
+	// Handle form data
+	if strings.ToUpper(req.Method) == "POST" {
+		// Validate form inputs
+		file, fileHeader, err := req.FormFile("file")
+		if err != nil {
+			e = fmt.Sprintf("File error %s", err.Error())
+		}
+		password := req.FormValue("password")
+		if len(password) == 0 {
+			e = "No password was given"
+		} else {
+			// Valid form inputs, call file uploader
+			FileUploader(file, *fileHeader, password)
+			i = "File uploaded successfully"
+			InfoLogger.Printf("Uploaded %s with %s as password", fileHeader.Filename, password)
+		}
 	}
-	    t, _ := template.New("index").Parse(indexTemplate)
-    t.Execute(writer, page)
+	
+	IndexRenderer(&writer, req, e, i)
+}
+
+func DownloadHandler(w http.ResponseWriter, req *http.Request) {
+	InfoLogger.Printf("Download requested")
+	// Validate request method
+	if strings.ToUpper(req.Method) != "POST" {
+		IndexRenderer(&w, req, "Download request had invalid HTTP method field", "")
+		return
+	}
+	
+	// Validate form data
+	password := []byte(req.FormValue("password"))
+	filename := req.FormValue("filename")
+	if len(password) == 0 || len(filename) == 0 {
+		IndexRenderer(&w, req, "Download request had invalid password or filename", "")
+		return
+	}
+	
+	// Validate password
+	if !CheckPassword(password, filename) {
+		IndexRenderer(&w, req, "Wrong password", "")
+		return
+	}
+
+	ready := make(chan *ChunkInfo, 10)	
+	go StartChunkRetriever(filename, password, ready)
+	
+	var q 	[]*ChunkInfo
+	// Loop over channel range
+	for nc := range ready {
+		InfoLogger.Printf("Received %d chunk size %d..", nc.Index, len(nc.ChunkData))
+		q = append(q, nc)
+	}
+	
+	// Order the chunks
+	b := make([]*ChunkInfo, len(q))
+	for _, n := range q {
+		b[n.Index] = n
+	}
+	
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"", filename))
+	w.Header().Set("Content-type", "application/octet-stream")
+	for _, n := range b {
+		d := Decrypt(KeyFromPassword(string(password)), n.ChunkData)
+		w.Write(d[:n.Length])
+	}
 }
 
 func main() {
 	// Init logging
-	InfoLogger = log.New(os.Stdout, "[MAIN][INFO] ", log.LstdFlags)
-	
+	InfoLogger = log.New(os.Stdout, "[INFO] ", log.LstdFlags)
+
 	// Get command line parameters
 	var webServerPort int
 	var serverPort int
@@ -257,7 +324,7 @@ func main() {
 	
 	// Start chunk manager
 	ChunkQueue = make(chan *ChunkChannel, 10)
-	go StartChunkManager(ChunkQueue)
+	go StartDistributor(ChunkQueue)
 	
 	// Start peermanager
 	if bootstrap != "" {
@@ -271,6 +338,7 @@ func main() {
 	}
 	
 	http.HandleFunc("/", IndexHandler)
+	http.HandleFunc("/download/", DownloadHandler)
 	// Try starting webserver, incrementing port every time it fails
 	for {
 		InfoLogger.Printf("Starting HTTP interface :%d", webServerPort)

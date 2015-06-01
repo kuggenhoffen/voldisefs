@@ -74,7 +74,7 @@ type ChunkRetrieveRequest struct {
 // ChunkRetrieveResponse defines the chunk retrieval response message format
 // containing the chunk id and data if one was found, otherwise both fields 
 // will be empty
-type ChunkSRetrieveResponse ChunkInfo
+type ChunkRetrieveResponse ChunkInfo
 
 type PeerInfo struct {
 	Name			string
@@ -135,7 +135,24 @@ func DecodeMessage(reader io.Reader) (*BaseMessage, error) {
 		}
 		InfoLogger.Printf("Chunk store request received with data: %s", bmd.MsgData)
 		msg = &BaseMessage{MsgType: bmd.MsgType, Name: bmd.Name, MsgData: ci}
-
+	case MsgChunkRetrieveRequest:
+		cr := new(ChunkRetrieveRequest)
+		err := json.Unmarshal(*bmd.MsgData, cr)
+		if err != nil {
+			InfoLogger.Printf("Decoding error on ChunkRetrieveRequest")
+			return nil, err
+		}
+		InfoLogger.Printf("Chunk retrieve request received with data: %s", bmd.MsgData)
+		msg = &BaseMessage{MsgType: bmd.MsgType, Name: bmd.Name, MsgData: cr}
+	case MsgChunkRetrieveResponse:
+		cr := new(ChunkRetrieveResponse)
+		err := json.Unmarshal(*bmd.MsgData, cr)
+		if err != nil {
+			InfoLogger.Printf("Decoding error on ChunkRetrieveResponse")
+			return nil, err
+		}
+		InfoLogger.Printf("Chunk retrieve response received with data: %s", bmd.MsgData)
+		msg = &BaseMessage{MsgType: bmd.MsgType, Name: bmd.Name, MsgData: cr}
 	}
 	
 	return msg, nil
@@ -219,6 +236,22 @@ func SendChunkRetrieveRequest(recv *PeerInfo, cid ChunkID) (error) {
 	
 	// Create encoder to given connection and encode message
 	enc := json.NewEncoder(c)
+	err := enc.Encode(msg)
+	
+	return err
+}
+
+func SendChunkRetrieveResponse(w io.Writer, recv *PeerInfo, ci *ChunkInfo) (error) {
+	// Get base message struct
+	msg := BaseMessage{ MsgType: MsgChunkRetrieveResponse, 
+						Name: ownInfo.Name,
+						MsgData: ci }
+	
+	str,_ := json.Marshal(msg)
+	InfoLogger.Printf("Sent: %s", str)
+	
+	// Create encoder to given connection and encode message
+	enc := json.NewEncoder(w)
 	err := enc.Encode(msg)
 	
 	return err

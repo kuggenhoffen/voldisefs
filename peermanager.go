@@ -58,7 +58,7 @@ func StartNetwork(serverPort int, baddr *net.TCPAddr) {
 	}
 }
 
-var BootstrapRequestChannel = make(chan *PeerInfo, 10)
+var BootstrapRequestChannel = make(chan PeerInfo, 10)
 func StartBootstrap(addr *net.TCPAddr) {
 	
 	// Create temporary peerinfo for bootstrap server
@@ -68,18 +68,19 @@ func StartBootstrap(addr *net.TCPAddr) {
 	peerInfo.Name = ""
 	peerInfo.State = StateBootstrapStart
 	
-	BootstrapRequestChannel<-peerInfo
+	BootstrapRequestChannel<-*peerInfo
 	
-	go BootstrapProcessor(BootstrapRequestChannel, PeerChannel)
+	go BootstrapProcessor(BootstrapRequestChannel)
 }
 
-func BootstrapProcessor(bsReqs <-chan *PeerInfo, pi chan<- *PeerInfo) {
+func BootstrapProcessor(bsReqs <-chan PeerInfo) {
 	for {
 		InfoLogger.Printf("Waiting for bootstrap")
 		newPeer := <-bsReqs
 		
 		// Don't bootstrap with self or one that already is bootstrapping/bootstrapped
 		if newPeer.State != StateBootstrapStart {
+			InfoLogger.Printf("Bootstrap state of %s was %s", newPeer.Name, newPeer.State)
 			continue
 		}
 		newPeer.State = StateBootstrapStart
@@ -101,7 +102,7 @@ func BootstrapProcessor(bsReqs <-chan *PeerInfo, pi chan<- *PeerInfo) {
 		}
 		
 		// Add peer to manager
-		peerManager.addPeer(newPeer)
+		peerManager.addPeer(&newPeer)
 		go ClientConnection(conn)
 	}
 }
@@ -159,7 +160,7 @@ func ServerConnection(conn *net.TCPConn) {
 	
 	// Create new peer object if the client doesn't have one yet
 	if !exists {
-		InfoLogger.Printf("Peer not in peerlist")
+		InfoLogger.Printf("New peer %s", HostPortFromConn(conn))
 		peerInfo = new(PeerInfo)
 		peerInfo.Address = conn.RemoteAddr().(*net.TCPAddr).IP.String()
 		peerInfo.ServerPort = conn.RemoteAddr().(*net.TCPAddr).Port
@@ -184,6 +185,9 @@ func ServerConnection(conn *net.TCPConn) {
 		case MsgChunkStoreRequest:
 			InfoLogger.Printf("Received chunk store req")
 			ChunkStoreHandler(conn, &msgInfo)
+		case MsgChunkRetrieveRequest:
+			InfoLogger.Printf("Received chunk retrieve req")
+			ChunkRetrieveReqHandler(conn, &msgInfo)
 		}
 	}
 	
@@ -223,6 +227,11 @@ func ClientConnection(conn *net.TCPConn) {
 		case MsgBootstrapResponse:
 			InfoLogger.Printf("Received bootstrap resp")
 			BootstrapResponseHandler(conn, &msgInfo)
+			stop = true
+			break
+		case MsgChunkRetrieveResponse:
+			InfoLogger.Printf("Received chunk retrieve response")
+			ChunkRetrieveRespHandler(conn, &msgInfo)
 			stop = true
 			break
 		}
@@ -283,7 +292,9 @@ func BootstrapResponseHandler(conn *net.TCPConn, msg *MessageInfo) {
 		}
 		
 		// Add new peers to bootstrap request channel to start bootstrapping
-		BootstrapRequestChannel <- &peer
+		InfoLogger.Printf("Requesting bootstrap with peer %s (%s)", peer.Name, peer.ToKey())
+		peer.State = StateBootstrapStart
+		BootstrapRequestChannel <- peer
 	}
 }
 
@@ -297,4 +308,23 @@ func ChunkStoreHandler(conn *net.TCPConn, msg *MessageInfo) {
 	}
 	nc = ci
 	ChunkStorage[ci.ID] = nc
+}
+
+func ChunkRetrieveReqHandler(conn *net.TCPConn, msg *MessageInfo) {
+	cr := msg.Data.MsgData.(*ChunkRetrieveRequest)
+	req, e := ChunkStorage[cr.ID]
+	if !e {
+		req = &ChunkInfo{Index: -1}
+	}
+	InfoLogger.Printf("Sending chunk retrieve response to %s", msg.Src.Name)
+	SendChunkRetrieveResponse(conn, msg.Src, req)
+}
+
+
+func ChunkRetrieveRespHandler(conn *net.TCPConn, msg *MessageInfo) {
+	cr := msg.Data.MsgData.(*ChunkRetrieveResponse)
+	ChunkRetrievalChannel <- &ChunkInfo{ ID: cr.ID,
+										Index: cr.Index,
+										Length: cr.Length,
+										ChunkData: cr.ChunkData }
 }
