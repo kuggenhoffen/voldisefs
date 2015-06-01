@@ -38,3 +38,32 @@ No security is implemented for the node communications. The stored data itself i
 ## Reflections
 The main problem was the lack of time because of very late start. This was not a problem of the project itself, rather a personal failure to start work earlier. Earlier start would have resulted in more detailed design and in turn easier and more refined implementation.
 Implementation using the Go language presented some hurdles, mainly because of the lack of experience using it in more complicated applications. Understanding the concurrent programming and using the provided tools correctly required some studying. Also the lack of understanding of some of the basic idioms of Go resulted in it's own challenges.
+
+## Installation
+
+### Running the application
+1. Download the "bin/node" executable from https://github.com/kuggenhoffen/voldisefs
+2. Run the node executable
+For example, running 2 nodes on localhost:
+```
+node -serverport=10000
+node -bootstrap="127.0.0.1:10000" -serverport=10101
+```
+
+### Instructions for building the source (on linux)
+1. Install the Go tools (www.golang.org)
+2. Create a directory for Go projects (eg. "go_projects/") and a src directory ("go_projects/src/") for Go package sources
+3. Add the "go_projects" directory to GOPATH environment variable
+4. In the "go_projects/src/" directory clone the repository into "node" directory:
+```
+cd go_projects/src/
+git clone git@github.com:kuggenhoffen/voldisefs.git node
+```
+5. In the "go_projects/" directory install Go uuid package:
+```
+go get code.google.com/p/go-uuid/uuid
+```
+6. In the "go_projects/" directory run go build command:
+```
+go build node
+```
