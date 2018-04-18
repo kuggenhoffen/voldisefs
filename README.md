@@ -1,5 +1,5 @@
-#Distributed systems project
-#Volatile, distributed and secure file storage
+# Distributed systems project
+# Volatile, distributed and secure file storage
 
 Voldisefs is a distributed peer-to-peer file storage network. The purpose of the project is to be able to store files
 remotely, so that no third party shall be able to access the file contents without knowledge of the password used to store it 
